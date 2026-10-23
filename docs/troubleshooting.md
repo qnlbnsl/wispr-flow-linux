@@ -128,6 +128,25 @@ Run `--doctor` and work the failures top-down:
    If `/dev/uinput` is missing entirely, the kernel module isn't loaded yet —
    load it: `sudo modprobe uinput`.
 
+   The module can also be unloaded while `/dev/uinput` still exists: a
+   `crw------- root root` static placeholder that udev has never processed.
+   Then `--install-udev-rules` and `udevadm trigger` change nothing, because
+   udev has no device to apply the rule to. `udevadm info /dev/uinput`
+   answers `Unknown device` in that state. Load the module, persist it, and
+   re-trigger:
+
+   ```bash
+   echo uinput | sudo tee /etc/modules-load.d/uinput.conf
+   sudo modprobe uinput
+   sudo udevadm trigger --subsystem-match=misc --sysname-match=uinput
+   getfacl -p /dev/uinput   # expect a user:<you>:rw- line
+   ```
+
+   > [!NOTE]
+   > Seen on Omarchy 4.0.6 (Arch, Hyprland 0.56.2) with the
+   > `wispr-flow-appimage` AUR package: `--doctor` kept failing
+   > `/dev/uinput` after `--install-udev-rules` until the module was loaded.
+
 2. **`wl-clipboard` missing (Wayland)** — clipboard-based paste has no tool to
    set the selection with. Install it:
 
@@ -398,6 +417,77 @@ Wayland path (`/dev/uinput` and `wl-clipboard`), so nothing else in
 `--doctor` should move; its display line reports `Mode: XWayland forced`.
 If the dead zone is still there under XWayland, that is a different bug:
 open an issue with `--doctor` output and say which compositor.
+
+## Status pill sits in a bordered box mid-screen, or keyboard input goes to Wispr Flow on another workspace (Hyprland)
+
+On Hyprland the status pill's transparent window (class `wispr-flow`) is
+managed like any other window: it gets a border and shadow, opens centered
+on one workspace, and takes keyboard focus. With `misc:focus_on_activate`
+on (Omarchy's default), the app can also pull focus to a Wispr Flow window
+on another workspace, so typing in the window in front of you appears dead
+until you Alt+Tab back to it.
+
+### Fix
+
+Add window rules. This is the Hyprland 0.55+ Lua syntax; put it in any
+user Lua file your `hyprland.lua` loads (on Omarchy,
+`~/.config/hypr/looknfeel.lua`), then run `hyprctl reload` and
+`hyprctl configerrors`:
+
+```lua
+-- Never let Wispr Flow windows pull focus from the app you're typing in.
+hl.window_rule({ match = { class = "^wispr-flow$" }, focus_on_activate = false })
+
+-- The status pill: no decorations, never focused.
+hl.window_rule({
+  match = { class = "^wispr-flow$", title = "^(Status|Flow Status Indicator)$" },
+  float = true,
+  no_focus = true,
+  no_initial_focus = true,
+  no_dim = true,
+  no_shadow = true,
+  no_blur = true,
+  border_size = 0,
+  opacity = "1 1",
+})
+```
+
+The pill maps with an empty title and is named `Flow Status Indicator` and
+then `Status` afterwards, so the rules Hyprland only evaluates at map time
+(`pin`, `move`) don't match it, while the ones re-evaluated on title change
+(above) do. Pin it and move it to bottom-center by hand, once per app start:
+
+```bash
+addr=$(hyprctl clients -j |
+	jq -r '.[] | select(.class=="wispr-flow" and .title=="Status") | .address')
+hyprctl dispatch "hl.dsp.window.pin({ window = 'address:$addr' })"
+# x = (monitor width / scale - window width) / 2, y = monitor height / scale - window height
+hyprctl dispatch "hl.dsp.window.move({ x = 512, y = 250, window = 'address:$addr' })"
+```
+
+`hl.dsp.window.pin` toggles, so run it once. The coordinates above are for
+a 1920x1080 panel at scale 1.25 with the pill's 512x614 window.
+
+> [!NOTE]
+> Seen on Omarchy 4.0.6 / Hyprland 0.56.2. An `hl.on("window.title", ...)`
+> handler that runs the two dispatches automatically should work, but
+> hasn't been tested yet.
+
+To stop Wispr Flow from a terminal, use `pkill -x wispr-flow`. It runs
+cleanup tasks first, so it takes a few seconds to exit. `pkill -f` with the
+install path also matches the shell running it.
+
+## Wispr Flow and Chromium look zoomed in (Hyprland)
+
+Hyprland's `scale = "auto"` picks 1.5 on many 1080p laptop panels, and
+Electron and Chromium follow the compositor scale on native Wayland. Set an
+explicit scale in your monitor config (on Omarchy, `~/.config/hypr/monitors.lua`):
+
+```lua
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.25 })
+```
+
+Hyprland applies it on save; check with `hyprctl monitors | grep scale`.
 
 ## Selection reads come back empty
 
