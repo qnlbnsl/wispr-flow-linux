@@ -42,6 +42,9 @@ yourself from its repo; the build auto-fetches the prebuilt helper otherwise.
 The native sqlite rebuild pulls `@electron/rebuild` via `npx` at build time, so
 that one isn't a system package you install ahead of time.
 
+On Arch the build has no dependency auto-install; get the tools with
+`sudo pacman -S 7zip icoutils imagemagick rsync nodejs npm`.
+
 ## Obtaining the installer
 
 By default `build.sh` downloads the **pinned** installer — the exact version,
@@ -125,6 +128,33 @@ global (`arch`, `arch_deb`, `arch_rpm`, `electron_arch`) and Electron ships
 arm64 Linux artifacts, **but the arm64 build is not hardware-validated** — treat
 it as best-effort. Validation ran on x86_64; see
 [compatibility.md](compatibility.md).
+
+### Installing an unreleased build on Arch
+
+`--build appimage` without `appimagetool` installed stops after staging the
+AppDir at `build-linux/appimage/ai.wisprflow.WisprFlow.AppDir` and warns.
+That AppDir has the same tree the `wispr-flow-appimage` AUR package extracts
+into `/opt`, so you can package it directly and get a newer pinned Wispr Flow
+than the latest release. Copy the AUR `PKGBUILD`, drop `source`/`sha256sums`,
+and copy the AppDir instead of the extracted AppImage:
+
+```bash
+_appdir="$HOME/src/wispr-flow-linux/build-linux/appimage/ai.wisprflow.WisprFlow.AppDir"
+
+package() {
+	install -dm755 "${pkgdir}/opt/${pkgname}"
+	cp -a "${_appdir}/." "${pkgdir}/opt/${pkgname}/"
+	install -dm755 "${pkgdir}/usr/bin"
+	ln -s "/opt/${pkgname}/AppRun" "${pkgdir}/usr/bin/wispr-flow"
+	# ...desktop entry and icon as in the AUR PKGBUILD
+}
+```
+
+Set `pkgver` to the pinned version (`1.0.4+wispr1.6.1209`), run
+`makepkg -f`, quit Wispr Flow (`pkill -x wispr-flow`, then check
+`pgrep -x wispr-flow` is empty: an instance can ignore the signal and keep
+running from the deleted files), then `sudo pacman -U` the result. The next
+release then upgrades it through the AUR as usual.
 
 ## How it works
 

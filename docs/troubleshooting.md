@@ -489,6 +489,158 @@ hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.25 })
 
 Hyprland applies it on save; check with `hyprctl monitors | grep scale`.
 
+## Dictation pastes into GUI apps but not into a terminal or SSH session
+
+The helper always pastes with a uinput Ctrl+V chord. Terminals don't treat
+Ctrl+V as paste: they pass a raw `^V` to whatever runs inside, so over SSH a
+remote Claude Code reports "no image on clipboard" and a shell inserts a
+literal. The text is on the clipboard; only the keystroke is wrong. Same
+class of bug as #35 (Ghostty, Warp).
+
+### Fix
+
+Remap only the helper's virtual keyboard with [keyd](https://github.com/rvaiya/keyd),
+so its Ctrl+V becomes Shift+Insert, which pastes in terminals and in
+GTK/Qt/Chromium/Electron apps alike. Your physical Ctrl+V is untouched. The
+helper's device reports `1234:5678`
+(`grep -A1 'Wispr Flow Linux Helper' /proc/bus/input/devices`).
+
+Use the full config from the next section, not a bare `v = S-insert`
+mapping: routing the helper through keyd without dropping its modifiers
+turns a helper bug into stuck Ctrl/Alt/Super.
+
+```bash
+sudo pacman -S keyd            # or your distro's package
+sudo install -Dm644 wispr-flow.conf /etc/keyd/wispr-flow.conf
+sudo systemctl enable --now keyd
+```
+
+> [!IMPORTANT]
+> Once keyd grabs a keyboard, the helper only hears it through
+> `keyd virtual keyboard`, and the helper only scans for keyboards at start.
+> Restart Wispr Flow after keyd first starts and after every keyd restart
+> (a reboot is fine: keyd starts first). Otherwise push-to-talk goes dead.
+> `pkill -x wispr-flow`, then launch it again.
+
+## Ctrl, Alt or Super stays stuck after a dictation (Super+1 opens a menu, Backspace deletes a line)
+
+After a paste, apps behave as if Ctrl, Alt and/or Super are held: Super+N
+opens compositor menus instead of switching workspaces, Backspace deletes a
+whole word or line, push-to-talk lands in Command Mode (`ctrl + win + alt` in
+the launcher log). Pressing the modifiers yourself clears it for a while.
+
+The helper's `chord()` (`src/backend/uinput.rs` in the helper repo)
+snapshots the modifiers held on every readable `/dev/input/event*` device
+with `EVIOCGKEY`, releases them, sends Ctrl+V, then presses them again on
+its own virtual keyboard. You later release the physical key, but nothing
+releases the copy on the helper's device, so it stays down. The helper's
+own device is in the next snapshot too, so the stuck set re-presses itself
+on every paste. Check for it while touching no keys:
+
+```python
+# held-mods.py: run with python3 while touching no keys
+import fcntl, glob, os
+MODS = {29: "LCtrl", 97: "RCtrl", 42: "LShift", 54: "RShift",
+        56: "LAlt", 100: "RAlt", 125: "LSuper", 126: "RSuper"}
+L = 0x2ff // 8 + 1
+req = (2 << 30) | (L << 16) | (0x45 << 8) | 0x18
+for p in sorted(glob.glob("/dev/input/event*")):
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        continue
+    b = bytearray(L)
+    fcntl.ioctl(fd, req, b)
+    os.close(fd)
+    held = [n for c, n in MODS.items() if b[c // 8] >> (c % 8) & 1]
+    name = open(f"/sys/class/input/{os.path.basename(p)}/device/name").read()
+    if held:
+        print(p, name.strip(), held)
+```
+
+A `Wispr Flow Linux Helper  ['LCtrl', 'LAlt', 'LSuper']` line with your
+hands off the keyboard is this bug.
+
+### Fix
+
+Restarting Wispr Flow destroys the stuck device. To stop it recurring,
+filter the helper's device with keyd: drop every modifier it sends, and make
+its Ctrl a silent layer that only adds Ctrl to the shortcuts the helper
+actually sends. A stuck restore then emits nothing.
+
+```ini
+# /etc/keyd/wispr-flow.conf
+[ids]
+1234:5678
+
+[main]
+leftcontrol = layer(wispr_ctrl)
+rightcontrol = layer(wispr_ctrl)
+leftshift = noop
+rightshift = noop
+leftalt = noop
+rightalt = noop
+leftmeta = noop
+rightmeta = noop
+
+[wispr_ctrl]
+# Shift+Insert so paste also works in terminals (previous section).
+v = S-insert
+c = C-c
+x = C-x
+a = C-a
+z = C-z
+```
+
+`sudo keyd reload`, then restart Wispr Flow. The real fix belongs in the
+helper: release the restored modifiers, or leave its own device out of the
+snapshot.
+
+> [!NOTE]
+> Seen on Omarchy 4.0.6 / Hyprland 0.56.2, helper 0.1.2, Wispr Flow
+> 1.6.957 and 1.6.1209.
+
+## Shortcut recorder refuses a single key ("Shortcut must include a modifier key")
+
+The app only accepts shortcuts that contain a modifier (Ctrl, Alt, Shift,
+Win, Fn) or a mouse button, so a lone F13 is rejected. Fn is not an option
+on Linux: `fn` maps to `-1` in
+[`keycodes.json`](reference/keycodes.json), and most laptops handle Fn in
+firmware without ever reporting it (Fn+F1 arrives as `KEY_MUTE`, Fn alone
+as nothing).
+
+### Fix
+
+To hold one key for push-to-talk, have keyd make it send Wispr Flow's
+default chord. For Caps Lock on a built-in keyboard (find its
+`vendor:product` with `keyd monitor` or `/proc/bus/input/devices`):
+
+```ini
+# /etc/keyd/capslock-ptt.conf
+[ids]
+1532:0259
+
+[main]
+# Held Caps Lock = held Ctrl+Super; release releases both. Not oneshot.
+capslock = layer(wispr_ptt)
+
+[wispr_ptt:C-M]
+
+[shift]
+# Shift+Caps Lock still toggles caps lock.
+capslock = capslock
+```
+
+Restart Wispr Flow afterwards (see the keyd note above). Holding Caps Lock
+and pressing another key acts as Ctrl+Super plus that key.
+
+## Hiding the Hub window on a tiling compositor
+
+Hyprland and the other tiling compositors have no minimize. Close the Hub
+(Super+W on Omarchy): the app keeps running, the status pill and
+push-to-talk keep working, and the tray icon or launching Wispr Flow again
+brings the Hub back.
+
 ## Selection reads come back empty
 
 `GetSelectedTextViaCopy` returns nothing in some apps.
